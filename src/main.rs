@@ -187,7 +187,6 @@ fn main() {
                 if notif.method == "textDocument/didOpen"
                     || notif.method == "textDocument/didChange"
                 {
-                    eprintln!("DEBUG: Received notification: {}", notif.method);
                     let params = if notif.method == "textDocument/didOpen" {
                         let open: DidOpenTextDocumentParams =
                             serde_json::from_value(notif.params).unwrap();
@@ -209,17 +208,24 @@ fn main() {
                     let uri = params.text_document.uri.to_string();
                     let text = params.content_changes[0].text.clone();
 
-                    // Extract language and clean text (remove language comments)
-                    let (lang, cleaned_text) = languagetool_lsp::extract_lang_and_clean(&text);
-                    eprintln!("DEBUG: Using language: {} for document {}", lang, uri);
-                    eprintln!("DEBUG: Original text: '{}'", text);
-                    eprintln!("DEBUG: Cleaned text: '{}'", cleaned_text);
-                    eprintln!("DEBUG: Texts equal? {}", text == cleaned_text);
+                    // Get or create document state
+                    let is_new_doc = !documents.contains_key(&uri);
+                    let mut doc_state = if is_new_doc {
+                        DocumentState::new()
+                    } else {
+                        documents.remove(&uri).unwrap()
+                    };
 
-                    let mut doc_state = DocumentState::new();
+                    // Always update text
                     doc_state.text = text.clone();
 
+                    // Always check for now - performance optimization can come later
+                    let should_check = true;
+
                     let mut diagnostics = vec![];
+
+                    // Extract language and clean text (remove language comments)
+                    let (lang, cleaned_text) = languagetool_lsp::extract_lang_and_clean(&text);
 
                     // Check text with LanguageTool
                     if let Err(e) = rt.block_on(async {
@@ -280,32 +286,20 @@ async fn check_text_with_languagetool(
         .with_text(cleaned_text)
         .with_language(lang.to_string());
 
-    eprintln!("DEBUG: Sending to LanguageTool: text='{}', len={}", cleaned_text.replace('\n', "\\n"), cleaned_text.chars().count());
-
     match client.check(&req).await {
         Ok(response) => {
             for lt_match in response.matches {
                 let context = &lt_match.context;
                 let offset = context.offset as usize;
                 let length = context.length as usize;
-                eprintln!("DEBUG: LT returned offset={}, length={}, text snippet: '{}'",
-                    offset, length,
-                    if offset + length <= cleaned_text.len() {
-                        &cleaned_text[offset..offset+length]
-                    } else {
-                        "out of bounds"
-                    }
-                );
 
                 // Map offset from cleaned text to original text
                 let original_offset = map_cleaned_offset_to_original(cleaned_text, original_text, offset);
                 let original_end_offset = map_cleaned_offset_to_original(cleaned_text, original_text, offset + length);
-                eprintln!("DEBUG: Mapped to original_offset={}, original_end_offset={}", original_offset, original_end_offset);
 
                 // Convert character offset to line/character position in original text
                 let (line, character) = char_offset_to_line_char(original_text, original_offset);
                 let (end_line, end_character) = char_offset_to_line_char(original_text, original_end_offset);
-                eprintln!("DEBUG: Line/char: ({}, {}) -> ({}, {})", line, character, end_line, end_character);
 
                 let word = extract_word_at_offset(original_text, original_offset, original_end_offset - original_offset);
                 let message = lt_match.message.clone();
